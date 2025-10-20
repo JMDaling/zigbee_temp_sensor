@@ -1,0 +1,69 @@
+# ESP-IDF build output
+build/
+sdkconfig
+sdkconfig.old
+*.bin
+*.elf
+*.map
+
+# Dependencies and managed components
+dependencies.lock
+managed_components/
+
+# Python
+*.pyc
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+env/
+ENV/
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.code-workspace
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Logs
+*.log
+
+# Backup files
+*.bak
+*.backup
+
+# Certificates and keys (if you have any)
+*.pem
+*.key
+*.crt
+private/
+
+# OS generated files
+Thumbs.db
+.directory
+
+# Test coverage
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# Documentation builds
+docs/_build/
+docs/doxygen-warning-log.txt
+
+# Temporary files
+tmp/
+temp/
+*.tmp

@@ -9,12 +9,17 @@
 #include "ha/esp_zigbee_ha_standard.h"
 #include "ds18x20.h"
 #include "zigbee_temp_sensor.h"
+#include "driver/gpio.h"
 
 #if !defined ZB_ED_ROLE
 #error Define ZB_ED_ROLE in idf.py menuconfig to compile sensor (End Device) source code.
 #endif
 
 static const char *TAG = "ESP_ZB_TEMP_SENSOR";
+
+
+/* Debug LED */
+#define DEBUG_LED_GPIO                 15        /* GPIO15 for status LED */
 
 /* DS18B20 */
 static ds18x20_addr_t ds18b20_addrs[MAX_SENSORS];
@@ -66,6 +71,29 @@ static esp_err_t ds18b20_init(void)
     return ESP_OK;
 }
 
+static void debug_led_init(void)
+{
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << DEBUG_LED_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io_conf);
+    gpio_set_level(DEBUG_LED_GPIO, 0);
+}
+
+static void debug_led_blink(int times)
+{
+    for (int i = 0; i < times; i++) {
+        gpio_set_level(DEBUG_LED_GPIO, 1);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        gpio_set_level(DEBUG_LED_GPIO, 0);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
 static void temp_sensor_task(void *pvParameters)
 {
     bool first_reading[MAX_SENSORS] = {true, true, true};
@@ -73,18 +101,37 @@ static void temp_sensor_task(void *pvParameters)
     ESP_LOGI(TAG, "Temperature sensor task started (threshold: 0.1°C, interval: %dms)", 
              TEMP_REPORT_INTERVAL_MS);
     
+    debug_led_init();
+    debug_led_blink(2);  // 2 blinks = task started successfully
+    
     if (ds18b20_init() != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize DS18B20");
+        // Continuous blinking = error
+        while(1) {
+            debug_led_blink(1);
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
         vTaskDelete(NULL);
         return;
     }
     
+    // Single long blink = sensors found OK
+    gpio_set_level(DEBUG_LED_GPIO, 1);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    gpio_set_level(DEBUG_LED_GPIO, 0);
+    
+    uint32_t error_count = 0;
+    
     while (1) {
+        bool any_read_success = false;
+        
         for (size_t i = 0; i < sensor_count; i++) {
             float temperature = 0.0f;
             esp_err_t ret = ds18x20_measure_and_read(DS18B20_GPIO, ds18b20_addrs[i], &temperature);
             
             if (ret == ESP_OK) {
+                any_read_success = true;
+                
                 if (temperature >= TEMP_SENSOR_MIN_VALUE && temperature <= TEMP_SENSOR_MAX_VALUE) {
                     
                     float temp_diff = fabs(temperature - last_reported_temps[i]);
@@ -96,6 +143,7 @@ static void temp_sensor_task(void *pvParameters)
                         first_reading[i] = false;
                         ESP_LOGI(TAG, "📤 Sensor %d REPORTED: %.2f°C (Δ%.2f°C)", 
                                  i, temperature, temp_diff);
+                        // NO LED flash for normal reporting
                     } else {
                         ESP_LOGI(TAG, "📊 Sensor %d Read: %.2f°C (Δ%.2f°C) - no report (< 0.1°C)", 
                                  i, temperature, temp_diff);
@@ -103,7 +151,16 @@ static void temp_sensor_task(void *pvParameters)
                 }
             } else {
                 ESP_LOGW(TAG, "Failed to read temperature from sensor %d", i);
+                error_count++;
             }
+        }
+        
+        // Only flash LED if there were errors
+        if (!any_read_success) {
+            debug_led_blink(3);  // 3 quick blinks = all sensors failed
+            error_count++;
+        } else if (error_count > 0) {
+            error_count = 0;  // Reset error counter on successful read
         }
         
         vTaskDelay(pdMS_TO_TICKS(TEMP_REPORT_INTERVAL_MS));
@@ -142,15 +199,19 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
     case ESP_ZB_BDB_SIGNAL_DEVICE_FIRST_START:
     case ESP_ZB_BDB_SIGNAL_DEVICE_REBOOT:
         if (err_status == ESP_OK) {
-            // DON'T start the sensor task here - wait until joined!
             if (esp_zb_bdb_is_factory_new()) {
                 ESP_LOGI(TAG, "🔍 Starting network steering (searching for networks)");
+                debug_led_blink(5);  // 5 blinks = searching for network
                 esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
             } else {
                 ESP_LOGI(TAG, "♻️  Device reconnecting to existing network");
+                debug_led_blink(2);  // 2 blinks = reconnecting
+                ESP_LOGI(TAG, "Starting temperature sensor task (reconnect)");
+                deferred_driver_init();
             }
         } else {
             ESP_LOGW(TAG, "⚠️  Device start failed, retrying...");
+            debug_led_blink(10);  // 10 fast blinks = startup failed
             esp_zb_scheduler_alarm((esp_zb_callback_t)bdb_start_top_level_commissioning_cb,
                                    ESP_ZB_BDB_MODE_INITIALIZATION, 1000);
         }
@@ -163,14 +224,19 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             ESP_LOGI(TAG, "✅ JOINED NETWORK - PAN: 0x%04hx, Channel: %d, Addr: 0x%04hx",
                      esp_zb_get_pan_id(), esp_zb_get_current_channel(), esp_zb_get_short_address());
             
-            // NOW start the sensor task - network is ready!
-            ESP_LOGI(TAG, "Starting temperature sensor task");
+            // One long blink = successfully joined network
+            gpio_set_level(DEBUG_LED_GPIO, 1);
+            vTaskDelay(pdMS_TO_TICKS(1000));  // 1 second on
+            gpio_set_level(DEBUG_LED_GPIO, 0);
+            
+            ESP_LOGI(TAG, "Starting temperature sensor task (new join)");
             deferred_driver_init();
             
         } else {
             static int retry_count = 0;
             if (++retry_count % 10 == 0) {
                 ESP_LOGW(TAG, "🔄 Still searching for network (attempt %d)", retry_count);
+                debug_led_blink(1);  // Single blink every 10 retries
             }
             esp_zb_scheduler_alarm((esp_zb_callback_t)bdb_start_top_level_commissioning_cb, 
                                    ESP_ZB_BDB_MODE_NETWORK_STEERING, 1000);
@@ -267,10 +333,8 @@ static void esp_zb_task(void *pvParameters)
 
 void app_main(void)
 {
-    // TEMPORARY: Force factory reset on boot
-    ESP_LOGI("FACTORY_RESET", "Forcing factory reset...");
-    esp_zb_nvram_erase_at_start(true);  // Force erase on next init
-
+    // REMOVE the LED test code - not needed anymore
+    
     esp_zb_platform_config_t config = {
         .radio_config = {.radio_mode = ZB_RADIO_MODE_NATIVE},
         .host_config = {.host_connection_mode = ZB_HOST_CONNECTION_MODE_NONE},

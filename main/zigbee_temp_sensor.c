@@ -17,20 +17,28 @@
 static const char *TAG = "ESP_ZB_TEMP_SENSOR";
 
 /* DS18B20 */
-static ds18x20_addr_t ds18b20_addrs[1];
+static ds18x20_addr_t ds18b20_addrs[MAX_SENSORS];
 static size_t sensor_count = 0;
+static float last_reported_temps[MAX_SENSORS] = {0};  // Track last reported temp for each sensor
 
 static int16_t zb_temperature_to_s16(float temp)
 {
     return (int16_t)(temp * 100);
 }
 
-static void esp_app_temp_sensor_handler(float temperature)
+static void esp_app_temp_sensor_handler(uint8_t sensor_index, float temperature)
 {
+    if (sensor_index >= sensor_count) {
+        ESP_LOGW(TAG, "Invalid sensor index: %d", sensor_index);
+        return;
+    }
+    
     int16_t measured_value = zb_temperature_to_s16(temperature);
+    uint8_t endpoint = HA_TEMP_SENSOR_ENDPOINT_BASE + sensor_index;
+    
     /* Update temperature sensor measured value */
     esp_zb_lock_acquire(portMAX_DELAY);
-    esp_zb_zcl_set_attribute_val(HA_ESP_SENSOR_ENDPOINT,
+    esp_zb_zcl_set_attribute_val(endpoint,
         ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
         ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID, &measured_value, false);
     esp_zb_lock_release();
@@ -38,30 +46,32 @@ static void esp_app_temp_sensor_handler(float temperature)
 
 static esp_err_t ds18b20_init(void)
 {
-    esp_err_t ret;
-    
     ESP_LOGI(TAG, "Initializing DS18B20 on GPIO%d", DS18B20_GPIO);
-    vTaskDelay(pdMS_TO_TICKS(100));
     
-    ret = ds18x20_scan_devices(DS18B20_GPIO, ds18b20_addrs, 1, &sensor_count);
+    // ds18x20_scan_devices needs 4 arguments including 'found' output parameter
+    esp_err_t res = ds18x20_scan_devices(DS18B20_GPIO, ds18b20_addrs, MAX_SENSORS, &sensor_count);
     
-    if (ret != ESP_OK || sensor_count == 0) {
+    if (res != ESP_OK || sensor_count == 0) {
         ESP_LOGE(TAG, "No DS18B20 sensors found!");
-        return ESP_ERR_NOT_FOUND;
+        return ESP_FAIL;
     }
     
     ESP_LOGI(TAG, "Found %d DS18B20 sensor(s)", sensor_count);
+    
+    // Log each sensor's ROM address - use correct format specifiers
+    for (size_t i = 0; i < sensor_count; i++) {
+        ESP_LOGI(TAG, "Sensor %d ROM: %016llX", i, (unsigned long long)ds18b20_addrs[i]);
+    }
+    
     return ESP_OK;
 }
 
 static void temp_sensor_task(void *pvParameters)
 {
-    float temperature = 0.0f;
-    float last_reported_temp = 0.0f;
-    bool first_reading = true;
+    bool first_reading[MAX_SENSORS] = {true, true, true};
     
-    ESP_LOGI(TAG, "Temperature sensor task started (threshold: 0.%d°C, interval: %dms)", 
-             TEMP_DELTA_THRESHOLD, TEMP_REPORT_INTERVAL_MS);
+    ESP_LOGI(TAG, "Temperature sensor task started (threshold: 0.1°C, interval: %dms)", 
+             TEMP_REPORT_INTERVAL_MS);
     
     if (ds18b20_init() != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize DS18B20");
@@ -70,27 +80,30 @@ static void temp_sensor_task(void *pvParameters)
     }
     
     while (1) {
-        esp_err_t ret = ds18x20_measure_and_read(DS18B20_GPIO, ds18b20_addrs[0], &temperature);
-        if (ret == ESP_OK) {
-            if (temperature >= TEMP_SENSOR_MIN_VALUE && temperature <= TEMP_SENSOR_MAX_VALUE) {
-                
-                float temp_diff = fabs(temperature - last_reported_temp);
-                float threshold = TEMP_DELTA_THRESHOLD / 100.0f;
+        for (size_t i = 0; i < sensor_count; i++) {
+            float temperature = 0.0f;
+            esp_err_t ret = ds18x20_measure_and_read(DS18B20_GPIO, ds18b20_addrs[i], &temperature);
+            
+            if (ret == ESP_OK) {
+                if (temperature >= TEMP_SENSOR_MIN_VALUE && temperature <= TEMP_SENSOR_MAX_VALUE) {
+                    
+                    float temp_diff = fabs(temperature - last_reported_temps[i]);
+                    float threshold = TEMP_DELTA_THRESHOLD / 100.0f;
 
-                // ESP_LOGI(TAG, "Temperature: %.2f°C (Zigbee value: %d)", temperature, zb_temperature_to_s16(temperature));
-
-                if (first_reading || (temp_diff >= threshold)) {
-                    esp_app_temp_sensor_handler(temperature);
-                    last_reported_temp = temperature;
-                    first_reading = false;
-                    ESP_LOGI(TAG, "📤 REPORTED: %.2f°C (Δ%.2f°C)", temperature, temp_diff);
-                } else {
-                    ESP_LOGI(TAG, "📊 Read: %.2f°C (Δ%.2f°C) - no report (< 0.1°C)", 
-                             temperature, temp_diff);
+                    if (first_reading[i] || (temp_diff >= threshold)) {
+                        esp_app_temp_sensor_handler(i, temperature);
+                        last_reported_temps[i] = temperature;
+                        first_reading[i] = false;
+                        ESP_LOGI(TAG, "📤 Sensor %d REPORTED: %.2f°C (Δ%.2f°C)", 
+                                 i, temperature, temp_diff);
+                    } else {
+                        ESP_LOGI(TAG, "📊 Sensor %d Read: %.2f°C (Δ%.2f°C) - no report (< 0.1°C)", 
+                                 i, temperature, temp_diff);
+                    }
                 }
+            } else {
+                ESP_LOGW(TAG, "Failed to read temperature from sensor %d", i);
             }
-        } else {
-            ESP_LOGW(TAG, "Failed to read temperature");
         }
         
         vTaskDelay(pdMS_TO_TICKS(TEMP_REPORT_INTERVAL_MS));
@@ -185,19 +198,6 @@ static esp_zb_cluster_list_t *custom_temperature_sensor_clusters_create(esp_zb_t
     return cluster_list;
 }
 
-static esp_zb_ep_list_t *custom_temperature_sensor_ep_create(uint8_t endpoint_id, esp_zb_temperature_sensor_cfg_t *temperature_sensor)
-{
-    esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
-    esp_zb_endpoint_config_t endpoint_config = {
-        .endpoint = endpoint_id,
-        .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
-        .app_device_id = ESP_ZB_HA_TEMPERATURE_SENSOR_DEVICE_ID,
-        .app_device_version = 0
-    };
-    esp_zb_ep_list_add_ep(ep_list, custom_temperature_sensor_clusters_create(temperature_sensor), endpoint_config);
-    return ep_list;
-}
-
 static void esp_zb_task(void *pvParameters)
 {
     /* Initialize Zigbee stack */
@@ -213,34 +213,52 @@ static void esp_zb_task(void *pvParameters)
     };
     esp_zb_init(&zb_nwk_cfg);
 
-    /* Create customized temperature sensor endpoint */
-    esp_zb_temperature_sensor_cfg_t sensor_cfg = ESP_ZB_DEFAULT_TEMPERATURE_SENSOR_CONFIG();
+    /* Create endpoint list with multiple temperature sensors */
+    esp_zb_ep_list_t *esp_zb_ep_list = esp_zb_ep_list_create();
     
-    sensor_cfg.temp_meas_cfg.min_value = zb_temperature_to_s16(TEMP_SENSOR_MIN_VALUE);
-    sensor_cfg.temp_meas_cfg.max_value = zb_temperature_to_s16(TEMP_SENSOR_MAX_VALUE);
-
-    esp_zb_ep_list_t *esp_zb_sensor_ep = custom_temperature_sensor_ep_create(HA_ESP_SENSOR_ENDPOINT, &sensor_cfg);
+    /* Create temperature sensor endpoint for each potential sensor */
+    for (uint8_t i = 0; i < MAX_SENSORS; i++) {
+        esp_zb_temperature_sensor_cfg_t sensor_cfg = ESP_ZB_DEFAULT_TEMPERATURE_SENSOR_CONFIG();
+        sensor_cfg.temp_meas_cfg.min_value = zb_temperature_to_s16(TEMP_SENSOR_MIN_VALUE);
+        sensor_cfg.temp_meas_cfg.max_value = zb_temperature_to_s16(TEMP_SENSOR_MAX_VALUE);
+        
+        uint8_t endpoint_id = HA_TEMP_SENSOR_ENDPOINT_BASE + i;
+        
+        // Create clusters and endpoint config
+        esp_zb_cluster_list_t *cluster_list = custom_temperature_sensor_clusters_create(&sensor_cfg);
+        esp_zb_endpoint_config_t endpoint_config = {
+            .endpoint = endpoint_id,
+            .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+            .app_device_id = ESP_ZB_HA_TEMPERATURE_SENSOR_DEVICE_ID,
+            .app_device_version = 0
+        };
+        
+        // Add endpoint to the list
+        esp_zb_ep_list_add_ep(esp_zb_ep_list, cluster_list, endpoint_config);
+    }
 
     /* Register the device */
-    esp_zb_device_register(esp_zb_sensor_ep);
+    esp_zb_device_register(esp_zb_ep_list);
 
-    /* Config the reporting info  */
-    esp_zb_zcl_reporting_info_t reporting_info = {
-        .direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_SRV,
-        .ep = HA_ESP_SENSOR_ENDPOINT,
-        .cluster_id = ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
-        .cluster_role = ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-        .dst.profile_id = ESP_ZB_AF_HA_PROFILE_ID,
-        .u.send_info.min_interval = 1,
-        .u.send_info.max_interval = 0,
-        .u.send_info.def_min_interval = 1,
-        .u.send_info.def_max_interval = 0,
-        .u.send_info.delta.u16 = TEMP_DELTA_THRESHOLD,  // 10 = 0.1°C
-        .attr_id = ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
-        .manuf_code = ESP_ZB_ZCL_ATTR_NON_MANUFACTURER_SPECIFIC,
-    };
-
-    esp_zb_zcl_update_reporting_info(&reporting_info);
+    /* Config the reporting info for all endpoints */
+    for (uint8_t i = 0; i < MAX_SENSORS; i++) {
+        esp_zb_zcl_reporting_info_t reporting_info = {
+            .direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_SRV,
+            .ep = HA_TEMP_SENSOR_ENDPOINT_BASE + i,
+            .cluster_id = ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
+            .cluster_role = ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+            .dst.profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+            .u.send_info.min_interval = 1,
+            .u.send_info.max_interval = 0,
+            .u.send_info.def_min_interval = 1,
+            .u.send_info.def_max_interval = 0,
+            .u.send_info.delta.u16 = TEMP_DELTA_THRESHOLD,
+            .attr_id = ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
+            .manuf_code = ESP_ZB_ZCL_ATTR_NON_MANUFACTURER_SPECIFIC,
+        };
+        esp_zb_zcl_update_reporting_info(&reporting_info);
+    }
+    
     esp_zb_set_primary_network_channel_set(ESP_ZB_PRIMARY_CHANNEL_MASK);
     ESP_ERROR_CHECK(esp_zb_start(false));
 

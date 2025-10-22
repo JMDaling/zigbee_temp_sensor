@@ -129,7 +129,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
     case ESP_ZB_BDB_SIGNAL_DEVICE_FIRST_START:
     case ESP_ZB_BDB_SIGNAL_DEVICE_REBOOT:
         if (err_status == ESP_OK) {
-            ESP_LOGI(TAG, "Deferred driver initialization successful");
+            // DON'T start the sensor task here - wait until joined!
             if (esp_zb_bdb_is_factory_new()) {
                 ESP_LOGI(TAG, "🔍 Starting network steering (searching for networks)");
                 esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
@@ -149,8 +149,12 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             esp_zb_get_extended_pan_id(extended_pan_id);
             ESP_LOGI(TAG, "✅ JOINED NETWORK - PAN: 0x%04hx, Channel: %d, Addr: 0x%04hx",
                      esp_zb_get_pan_id(), esp_zb_get_current_channel(), esp_zb_get_short_address());
+            
+            // NOW start the sensor task - network is ready!
+            ESP_LOGI(TAG, "Starting temperature sensor task");
+            deferred_driver_init();
+            
         } else {
-            // Only log every 10 retries to reduce spam
             static int retry_count = 0;
             if (++retry_count % 10 == 0) {
                 ESP_LOGW(TAG, "🔄 Still searching for network (attempt %d)", retry_count);
@@ -161,7 +165,6 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         break;
         
     default:
-        // Suppress routine signals, only log important ones
         if (sig_type != ESP_ZB_ZDO_SIGNAL_PRODUCTION_CONFIG_READY) {
             ESP_LOGD(TAG, "ZDO signal: %s (0x%x)", esp_zb_zdo_signal_to_string(sig_type), sig_type);
         }
@@ -173,8 +176,8 @@ static esp_zb_cluster_list_t *custom_temperature_sensor_clusters_create(esp_zb_t
 {
     esp_zb_cluster_list_t *cluster_list = esp_zb_zcl_cluster_list_create();
     esp_zb_attribute_list_t *basic_cluster = esp_zb_basic_cluster_create(&(temperature_sensor->basic_cfg));
-    ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME));
-    ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER));
+    ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, MANUFACTURER_NAME));
+    ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, MODEL_IDENTIFIER));
     ESP_ERROR_CHECK(esp_zb_cluster_list_add_basic_cluster(cluster_list, basic_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
     ESP_ERROR_CHECK(esp_zb_cluster_list_add_identify_cluster(cluster_list, esp_zb_identify_cluster_create(&(temperature_sensor->identify_cfg)), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
     ESP_ERROR_CHECK(esp_zb_cluster_list_add_identify_cluster(cluster_list, esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_IDENTIFY), ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE));
@@ -212,8 +215,10 @@ static void esp_zb_task(void *pvParameters)
 
     /* Create customized temperature sensor endpoint */
     esp_zb_temperature_sensor_cfg_t sensor_cfg = ESP_ZB_DEFAULT_TEMPERATURE_SENSOR_CONFIG();
+    
     sensor_cfg.temp_meas_cfg.min_value = zb_temperature_to_s16(TEMP_SENSOR_MIN_VALUE);
     sensor_cfg.temp_meas_cfg.max_value = zb_temperature_to_s16(TEMP_SENSOR_MAX_VALUE);
+
     esp_zb_ep_list_t *esp_zb_sensor_ep = custom_temperature_sensor_ep_create(HA_ESP_SENSOR_ENDPOINT, &sensor_cfg);
 
     /* Register the device */
@@ -244,6 +249,10 @@ static void esp_zb_task(void *pvParameters)
 
 void app_main(void)
 {
+    // TEMPORARY: Force factory reset on boot
+    ESP_LOGI("FACTORY_RESET", "Forcing factory reset...");
+    esp_zb_nvram_erase_at_start(true);  // Force erase on next init
+
     esp_zb_platform_config_t config = {
         .radio_config = {.radio_mode = ZB_RADIO_MODE_NATIVE},
         .host_config = {.host_connection_mode = ZB_HOST_CONNECTION_MODE_NONE},

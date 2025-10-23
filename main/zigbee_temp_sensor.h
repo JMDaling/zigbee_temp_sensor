@@ -6,7 +6,7 @@
 /* Zigbee configuration */
 #define INSTALLCODE_POLICY_ENABLE       false    /* Disable install code for easier pairing */
 #define ED_AGING_TIMEOUT                ESP_ZB_ED_AGING_TIMEOUT_64MIN
-#define ED_KEEP_ALIVE                   3000     /* 3000 millisecond */
+#define ED_KEEP_ALIVE                   10000    /* Wake up every 10 seconds */
 #define HA_TEMP_SENSOR_ENDPOINT_BASE    10       /* Base endpoint (10, 11, 12 for 3 sensors) */
 #define ESP_ZB_PRIMARY_CHANNEL_MASK     ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK
 

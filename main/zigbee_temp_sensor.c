@@ -99,31 +99,51 @@ static void debug_led_init(void)
     gpio_set_level(DEBUG_LED_GPIO, 0);
 }
 
-static void debug_led_blink(int times)
+static void led_blink(int times, uint32_t duration_ms, uint32_t pause_ms)
 {
     for (int i = 0; i < times; i++) {
         gpio_set_level(DEBUG_LED_GPIO, 1);
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(duration_ms));
         gpio_set_level(DEBUG_LED_GPIO, 0);
-        vTaskDelay(pdMS_TO_TICKS(100));
+        if (i < times - 1) {  // Don't pause after last blink
+            vTaskDelay(pdMS_TO_TICKS(pause_ms));
+        }
     }
+}
+
+static void led_blink_quick(int times)
+{
+    led_blink(times, 100, 100);  // 100ms on, 100ms off
+}
+
+static void led_blink_normal(int times)
+{
+    led_blink(times, 200, 200);  // 200ms on, 200ms off
+}
+
+static void led_blink_long(int times)
+{
+    led_blink(times, 800, 400);  // 800ms on, 400ms off
 }
 
 static void temp_sensor_task(void *pvParameters)
 {
     bool first_reading[MAX_SENSORS] = {true, true, true};
+    bool any_reported = false;  // ADD THIS LINE - declare the variable
     
     ESP_LOGI(TAG, "Temperature sensor task started (threshold: 0.1°C, interval: %dms)", 
              TEMP_REPORT_INTERVAL_MS);
     
     debug_led_init();
-    debug_led_blink(2);  // 2 blinks = task started successfully
+    led_blink_quick(2);  // 2 quick blinks = task started successfully
+
+    // Pause before sensor init (helps for debugging by splitting LED indications)
+    vTaskDelay(pdMS_TO_TICKS(500));
     
     if (ds18b20_init() != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize DS18B20");
-        // Continuous blinking = error
         while(1) {
-            debug_led_blink(1);
+            led_blink_long(1);  // 1 long blink repeating = critical error
             vTaskDelay(pdMS_TO_TICKS(500));
         }
         vTaskDelete(NULL);
@@ -131,14 +151,13 @@ static void temp_sensor_task(void *pvParameters)
     }
     
     // Single long blink = sensors found OK
-    gpio_set_level(DEBUG_LED_GPIO, 1);
-    vTaskDelay(pdMS_TO_TICKS(500));
-    gpio_set_level(DEBUG_LED_GPIO, 0);
+    led_blink(1, 1000, 0);  // 1 second blink
     
     uint32_t error_count = 0;
     
     while (1) {
         bool any_read_success = false;
+        any_reported = false;  // Reset at start of each cycle
         
         for (size_t i = 0; i < sensor_count; i++) {
             float temperature = 0.0f;
@@ -156,9 +175,9 @@ static void temp_sensor_task(void *pvParameters)
                         esp_app_temp_sensor_handler(i, temperature);
                         last_reported_temps[i] = temperature;
                         first_reading[i] = false;
+                        any_reported = true;
                         ESP_LOGI(TAG, "📤 Sensor %d REPORTED: %.2f°C (Δ%.2f°C)", 
                                  i, temperature, temp_diff);
-                        // NO LED flash for normal reporting
                     } else {
                         ESP_LOGI(TAG, "📊 Sensor %d Read: %.2f°C (Δ%.2f°C) - no report (< 0.1°C)", 
                                  i, temperature, temp_diff);
@@ -169,10 +188,16 @@ static void temp_sensor_task(void *pvParameters)
                 error_count++;
             }
         }
-        
-        // Only flash LED if there were errors
+
+        // Single quick blink if any sensor reported
+        if (any_reported) {
+            led_blink_quick(1);
+        }
+
+        // 3 long blinks if ALL sensors failed
         if (!any_read_success) {
-            debug_led_blink(3);  // 3 quick blinks = all sensors failed
+            ESP_LOGE(TAG, "❌ All sensors failed!");
+            led_blink_long(3);  // 3 long blinks = error
             error_count++;
         } else if (error_count > 0) {
             error_count = 0;  // Reset error counter on successful read
@@ -216,17 +241,17 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         if (err_status == ESP_OK) {
             if (esp_zb_bdb_is_factory_new()) {
                 ESP_LOGI(TAG, "🔍 Starting network steering (searching for networks)");
-                debug_led_blink(5);  // 5 blinks = searching for network
+                led_blink_normal(5);  // 5 normal blinks = searching
                 esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
             } else {
                 ESP_LOGI(TAG, "♻️  Device reconnecting to existing network");
-                debug_led_blink(2);  // 2 blinks = reconnecting
+                led_blink_quick(2);  // 2 quick blinks = reconnecting
                 ESP_LOGI(TAG, "Starting temperature sensor task (reconnect)");
                 deferred_driver_init();
             }
         } else {
             ESP_LOGW(TAG, "⚠️  Device start failed, retrying...");
-            debug_led_blink(10);  // 10 fast blinks = startup failed
+            led_blink_quick(10);  // 10 fast blinks = startup failed
             esp_zb_scheduler_alarm((esp_zb_callback_t)bdb_start_top_level_commissioning_cb,
                                    ESP_ZB_BDB_MODE_INITIALIZATION, 1000);
         }
@@ -240,9 +265,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                      esp_zb_get_pan_id(), esp_zb_get_current_channel(), esp_zb_get_short_address());
             
             // One long blink = successfully joined network
-            gpio_set_level(DEBUG_LED_GPIO, 1);
-            vTaskDelay(pdMS_TO_TICKS(1000));  // 1 second on
-            gpio_set_level(DEBUG_LED_GPIO, 0);
+            led_blink(1, 1000, 0);  // 1 second blink
             
             ESP_LOGI(TAG, "Starting temperature sensor task (new join)");
             deferred_driver_init();
@@ -251,7 +274,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             static int retry_count = 0;
             if (++retry_count % 10 == 0) {
                 ESP_LOGW(TAG, "🔄 Still searching for network (attempt %d)", retry_count);
-                debug_led_blink(1);  // Single blink every 10 retries
+                led_blink_quick(1);  // Single quick blink every 10 retries
             }
             esp_zb_scheduler_alarm((esp_zb_callback_t)bdb_start_top_level_commissioning_cb, 
                                    ESP_ZB_BDB_MODE_NETWORK_STEERING, 1000);

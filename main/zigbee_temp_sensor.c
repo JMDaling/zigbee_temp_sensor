@@ -10,6 +10,7 @@
 #include "ds18x20.h"
 #include "zigbee_temp_sensor.h"
 #include "driver/gpio.h"
+#include "esp_pm.h"  // Add this at the top with other includes
 
 #if !defined ZB_ED_ROLE
 #error Define ZB_ED_ROLE in idf.py menuconfig to compile sensor (End Device) source code.
@@ -152,6 +153,8 @@ static void temp_sensor_task(void *pvParameters)
     
     // Single long blink = sensors found OK
     led_blink(1, 1000, 0);  // 1 second blink
+
+    ESP_LOGI(TAG, "Starting temperature measurement loop, reporting every %d seconds", TEMP_REPORT_INTERVAL_MS / 1000);
     
     uint32_t error_count = 0;
     
@@ -376,6 +379,21 @@ void app_main(void)
         .host_config = {.host_connection_mode = ZB_HOST_CONNECTION_MODE_NONE},
     };
     ESP_ERROR_CHECK(nvs_flash_init());
+    
+    // ========== PHASE 1: Enable automatic light sleep ==========
+    esp_pm_config_t pm_config = {
+        .max_freq_mhz = 80,            // Full speed when active (change to 160MHz if needed)
+        .min_freq_mhz = 40,            // Drop to 40MHz when idle
+        .light_sleep_enable = true     // Enable automatic light sleep
+    };
+    esp_err_t pm_err = esp_pm_configure(&pm_config);
+    if (pm_err == ESP_OK) {
+        ESP_LOGI("POWER", "✅ Automatic light sleep enabled (80MHz → 40MHz)");
+    } else {
+        ESP_LOGW("POWER", "⚠️  Failed to enable power management: %s", esp_err_to_name(pm_err));
+    }
+    // ===========================================================
+    
     ESP_ERROR_CHECK(esp_zb_platform_config(&config));
 
     /* Start Zigbee stack task */

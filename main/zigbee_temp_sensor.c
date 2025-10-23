@@ -182,7 +182,8 @@ static uint32_t battery_read_voltage_mv(void)
         return 0;
     }
     
-    ESP_LOGI(TAG, "🔬 ADC raw: %d", adc_raw);
+    // REMOVE these debug logs (or keep them for debugging)
+    // ESP_LOGI(TAG, "🔬 ADC raw: %d", adc_raw);
     
     if (adc_cali_handle != NULL) {
         adc_cali_raw_to_voltage(adc_cali_handle, adc_raw, &voltage_mv);
@@ -190,14 +191,11 @@ static uint32_t battery_read_voltage_mv(void)
         voltage_mv = (adc_raw * 3300) / 4095;
     }
     
-    ESP_LOGI(TAG, "🔬 ADC calibrated: %d mV", voltage_mv);
+    // ESP_LOGI(TAG, "🔬 ADC calibrated: %d mV", voltage_mv);
     
-    // FireBeetle 2 ESP32-C6 voltage divider ratio
-    // Typically 2:1 or 11:2 ratio
-    // Adjust based on actual measurements: battery_voltage / adc_reading
-    uint32_t battery_mv = voltage_mv * 2;  // Start with 2x, adjust if needed
+    uint32_t battery_mv = voltage_mv * 2;
     
-    ESP_LOGI(TAG, "🔬 Battery: %lu mV", (unsigned long)battery_mv);
+    // ESP_LOGI(TAG, "🔬 Battery: %lu mV", (unsigned long)battery_mv);
     
     return battery_mv;
 }
@@ -221,6 +219,11 @@ static uint8_t battery_voltage_to_percentage(uint32_t voltage_mv)
 
 static void esp_app_battery_handler(uint8_t endpoint, uint8_t battery_pct)
 {
+    // REMOVE this duplicate call - battery_mv is already calculated in temp_sensor_task
+    // uint32_t battery_mv = battery_read_voltage_mv();
+    
+    // Calculate voltage unit from the battery percentage
+    // We need to get the actual voltage, so keep ONE call here
     uint32_t battery_mv = battery_read_voltage_mv();
     uint8_t battery_voltage_unit = battery_mv / 100;  // Convert mV to units of 100mV
     
@@ -335,7 +338,9 @@ static void temp_sensor_task(void *pvParameters)
                 esp_app_battery_handler(HA_TEMP_SENSOR_ENDPOINT_BASE + i, battery_pct);
             }
 
-            ESP_LOGI(TAG, "🔋 Battery: %lu mV (%d%%)", (unsigned long)battery_mv, battery_pct);
+            // SIMPLIFIED: Just log the final values (remove duplicate ADC debug logs)
+            ESP_LOGI(TAG, "🔋 Battery: %lu mV (%d%%) reported to %d endpoint(s)", 
+                     (unsigned long)battery_mv, battery_pct / 2, sensor_count);
             last_reported_battery_pct = battery_pct;
         }
 

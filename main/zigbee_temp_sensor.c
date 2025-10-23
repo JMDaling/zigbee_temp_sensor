@@ -7,10 +7,14 @@
 #include "freertos/task.h"
 #include "esp_zigbee_core.h"
 #include "ha/esp_zigbee_ha_standard.h"
+#include "zcl/esp_zigbee_zcl_power_config.h"
 #include "ds18x20.h"
 #include "zigbee_temp_sensor.h"
 #include "driver/gpio.h"
-#include "esp_pm.h"  // Add this at the top with other includes
+#include "esp_pm.h"
+#include "esp_adc/adc_oneshot.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
 
 #if !defined ZB_ED_ROLE
 #error Define ZB_ED_ROLE in idf.py menuconfig to compile sensor (End Device) source code.
@@ -25,6 +29,11 @@ static const char *TAG = "ESP_ZB_TEMP_SENSOR";
 static ds18x20_addr_t ds18b20_addrs[MAX_SENSORS];
 static size_t sensor_count = 0;
 static float last_reported_temps[MAX_SENSORS] = {0};  // Track last reported temp for each sensor
+
+/* Battery monitoring */
+static adc_oneshot_unit_handle_t adc_handle = NULL;
+static adc_cali_handle_t adc_cali_handle = NULL;
+static uint8_t last_reported_battery_pct = 255;  // 255 = never reported
 
 static int16_t zb_temperature_to_s16(float temp)
 {
@@ -126,6 +135,126 @@ static void led_blink_long(int times)
     led_blink(times, 800, 400);  // 800ms on, 400ms off
 }
 
+
+static esp_err_t battery_init(void)
+{
+    ESP_LOGI(TAG, "Initializing battery monitor on GPIO0 (ADC1_CH0 - internal)");
+    
+    // Configure ADC
+    adc_oneshot_unit_init_cfg_t init_config = {
+        .unit_id = ADC_UNIT_1,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config, &adc_handle));
+    
+    adc_oneshot_chan_cfg_t config = {
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+        .atten = BATTERY_ADC_ATTEN,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, BATTERY_ADC_CHANNEL, &config));
+    
+    // REMOVE THIS LINE - GPIO0 is internal, no need to configure as GPIO
+    // gpio_set_direction(BATTERY_GPIO, GPIO_MODE_INPUT);
+    
+    // Setup calibration
+    adc_cali_curve_fitting_config_t cali_config = {
+        .unit_id = ADC_UNIT_1,
+        .atten = BATTERY_ADC_ATTEN,
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+    };
+    esp_err_t ret = adc_cali_create_scheme_curve_fitting(&cali_config, &adc_cali_handle);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "ADC calibration successful");
+    } else {
+        ESP_LOGW(TAG, "ADC calibration failed, using raw values");
+    }
+    
+    return ESP_OK;
+}
+
+static uint32_t battery_read_voltage_mv(void)
+{
+    int adc_raw = 0;
+    int voltage_mv = 0;
+    
+    esp_err_t ret = adc_oneshot_read(adc_handle, BATTERY_ADC_CHANNEL, &adc_raw);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ADC read failed");
+        return 0;
+    }
+    
+    ESP_LOGI(TAG, "🔬 ADC raw: %d", adc_raw);
+    
+    if (adc_cali_handle != NULL) {
+        adc_cali_raw_to_voltage(adc_cali_handle, adc_raw, &voltage_mv);
+    } else {
+        voltage_mv = (adc_raw * 3300) / 4095;
+    }
+    
+    ESP_LOGI(TAG, "🔬 ADC calibrated: %d mV", voltage_mv);
+    
+    // FireBeetle 2 ESP32-C6 voltage divider ratio
+    // Typically 2:1 or 11:2 ratio
+    // Adjust based on actual measurements: battery_voltage / adc_reading
+    uint32_t battery_mv = voltage_mv * 2;  // Start with 2x, adjust if needed
+    
+    ESP_LOGI(TAG, "🔬 Battery: %lu mV", (unsigned long)battery_mv);
+    
+    return battery_mv;
+}
+
+static uint8_t battery_voltage_to_percentage(uint32_t voltage_mv)
+{
+    if (voltage_mv >= BATTERY_MAX_VOLTAGE) {
+        return 200;  // 100% in Zigbee format (0-200 = 0-100%)
+    }
+    if (voltage_mv <= BATTERY_MIN_VOLTAGE) {
+        return 0;    // 0%
+    }
+    
+    // Linear mapping: 3.0V-4.2V → 0-200 (Zigbee uses 0-200 for 0-100%)
+    uint32_t range = BATTERY_MAX_VOLTAGE - BATTERY_MIN_VOLTAGE;
+    uint32_t offset = voltage_mv - BATTERY_MIN_VOLTAGE;
+    uint8_t percentage = (offset * 200) / range;
+    
+    return percentage;
+}
+
+static void esp_app_battery_handler(uint8_t endpoint, uint8_t battery_pct)
+{
+    uint32_t battery_mv = battery_read_voltage_mv();
+    uint8_t battery_voltage_unit = battery_mv / 100;  // Convert mV to units of 100mV
+    
+    ESP_LOGI(TAG, "📊 Battery update for endpoint %d: %d%% (%lu mV, unit: %d)", 
+             endpoint, battery_pct / 2, (unsigned long)battery_mv, battery_voltage_unit);
+    
+    // Report battery voltage (0x0020)
+    esp_zb_zcl_status_t state_v = esp_zb_zcl_set_attribute_val(
+        endpoint,
+        ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
+        &battery_voltage_unit,
+        false
+    );
+    
+    // Report battery percentage (0x0021)
+    esp_zb_zcl_status_t state_p = esp_zb_zcl_set_attribute_val(
+        endpoint,
+        ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
+        &battery_pct,
+        false
+    );
+
+    if (state_v != ESP_ZB_ZCL_STATUS_SUCCESS) {
+        ESP_LOGE(TAG, "Failed to set battery voltage for endpoint %d", endpoint);
+    }
+    if (state_p != ESP_ZB_ZCL_STATUS_SUCCESS) {
+        ESP_LOGE(TAG, "Failed to set battery percentage for endpoint %d", endpoint);
+    }
+}
+
 static void temp_sensor_task(void *pvParameters)
 {
     bool first_reading[MAX_SENSORS] = {true, true, true};
@@ -135,8 +264,6 @@ static void temp_sensor_task(void *pvParameters)
              TEMP_REPORT_INTERVAL_MS);
     
     led_blink_quick(2);  // 2 quick blinks = task started successfully
-
-    // Pause before sensor init (helps for debugging by splitting LED indications)
     vTaskDelay(pdMS_TO_TICKS(500));
     
     if (ds18b20_init() != ESP_OK) {
@@ -149,12 +276,17 @@ static void temp_sensor_task(void *pvParameters)
         return;
     }
     
-    // Single long blink = sensors found OK
-    led_blink(1, 1000, 0);  // 1 second blink
+    led_blink(1, 1000, 0);
+
+    // Initialize battery monitoring
+    if (battery_init() != ESP_OK) {
+        ESP_LOGW(TAG, "Battery monitoring disabled");
+    }
 
     ESP_LOGI(TAG, "Starting temperature measurement loop, reporting every %d seconds", TEMP_REPORT_INTERVAL_MS / 1000);
     
     uint32_t error_count = 0;
+    uint32_t battery_report_counter = 0;
     
     while (1) {
         bool any_read_success = false;
@@ -188,6 +320,23 @@ static void temp_sensor_task(void *pvParameters)
                 ESP_LOGW(TAG, "Failed to read temperature from sensor %d", i);
                 error_count++;
             }
+        }
+
+        // Read and report battery (every hour or on first reading)
+        battery_report_counter += TEMP_REPORT_INTERVAL_MS;
+        if (battery_report_counter >= BATTERY_REPORT_INTERVAL_MS || last_reported_battery_pct == 255) {
+            battery_report_counter = 0;
+            
+            uint32_t battery_mv = battery_read_voltage_mv();
+            uint8_t battery_pct = battery_voltage_to_percentage(battery_mv);
+            
+            // Report battery to all endpoints
+            for (size_t i = 0; i < sensor_count; i++) {
+                esp_app_battery_handler(HA_TEMP_SENSOR_ENDPOINT_BASE + i, battery_pct);
+            }
+
+            ESP_LOGI(TAG, "🔋 Battery: %lu mV (%d%%)", (unsigned long)battery_mv, battery_pct);
+            last_reported_battery_pct = battery_pct;
         }
 
         // Single quick blink if any sensor reported
@@ -303,13 +452,39 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 static esp_zb_cluster_list_t *custom_temperature_sensor_clusters_create(esp_zb_temperature_sensor_cfg_t *temperature_sensor)
 {
     esp_zb_cluster_list_t *cluster_list = esp_zb_zcl_cluster_list_create();
+    
+    // Basic cluster
     esp_zb_attribute_list_t *basic_cluster = esp_zb_basic_cluster_create(&(temperature_sensor->basic_cfg));
     ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, MANUFACTURER_NAME));
     ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, MODEL_IDENTIFIER));
     ESP_ERROR_CHECK(esp_zb_cluster_list_add_basic_cluster(cluster_list, basic_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+    
+    // Identify cluster
     ESP_ERROR_CHECK(esp_zb_cluster_list_add_identify_cluster(cluster_list, esp_zb_identify_cluster_create(&(temperature_sensor->identify_cfg)), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
     ESP_ERROR_CHECK(esp_zb_cluster_list_add_identify_cluster(cluster_list, esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_IDENTIFY), ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE));
+    
+    // Temperature measurement cluster
     ESP_ERROR_CHECK(esp_zb_cluster_list_add_temperature_meas_cluster(cluster_list, esp_zb_temperature_meas_cluster_create(&(temperature_sensor->temp_meas_cfg)), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+    
+    // Power Configuration cluster (for battery reporting)
+    esp_zb_power_config_cluster_cfg_t power_cfg = {
+        .main_voltage = 0,
+        .main_freq = 0,
+    };
+    esp_zb_attribute_list_t *power_cluster = esp_zb_power_config_cluster_create(&power_cfg);
+    
+    // Add battery voltage attribute (units of 100mV)
+    uint8_t battery_voltage = 42;  // Default: 4.2V = 42
+    ESP_ERROR_CHECK(esp_zb_power_config_cluster_add_attr(power_cluster, 
+        ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID, &battery_voltage));
+    
+    // Add battery percentage attribute (0-200 = 0-100%)
+    uint8_t battery_percentage = 200;  // Default: 100%
+    ESP_ERROR_CHECK(esp_zb_power_config_cluster_add_attr(power_cluster, 
+        ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID, &battery_percentage));
+    
+    ESP_ERROR_CHECK(esp_zb_cluster_list_add_power_config_cluster(cluster_list, power_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+    
     return cluster_list;
 }
 

@@ -106,7 +106,7 @@ static void led_blink(int times, uint32_t duration_ms, uint32_t pause_ms)
         gpio_set_level(DEBUG_LED_GPIO, 1);
         vTaskDelay(pdMS_TO_TICKS(duration_ms));
         gpio_set_level(DEBUG_LED_GPIO, 0);
-        if (i < times - 1) {  // Don't pause after last blink
+        if (i < times - 1) {
             vTaskDelay(pdMS_TO_TICKS(pause_ms));
         }
     }
@@ -135,7 +135,6 @@ static void temp_sensor_task(void *pvParameters)
     ESP_LOGI(TAG, "Temperature sensor task started (threshold: 0.1°C, interval: %dms)", 
              TEMP_REPORT_INTERVAL_MS);
     
-    debug_led_init();
     led_blink_quick(2);  // 2 quick blinks = task started successfully
 
     // Pause before sensor init (helps for debugging by splitting LED indications)
@@ -244,17 +243,19 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         if (err_status == ESP_OK) {
             if (esp_zb_bdb_is_factory_new()) {
                 ESP_LOGI(TAG, "🔍 Starting network steering (searching for networks)");
-                led_blink_normal(5);  // 5 normal blinks = searching
                 esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
             } else {
                 ESP_LOGI(TAG, "♻️  Device reconnecting to existing network");
-                led_blink_quick(2);  // 2 quick blinks = reconnecting
                 ESP_LOGI(TAG, "Starting temperature sensor task (reconnect)");
                 deferred_driver_init();
             }
         } else {
             ESP_LOGW(TAG, "⚠️  Device start failed, retrying...");
-            led_blink_quick(10);  // 10 fast blinks = startup failed
+            // Slow blink while retrying
+            gpio_set_level(DEBUG_LED_GPIO, 1);
+            for (volatile int i = 0; i < 4000000; i++); // ~500ms on
+            gpio_set_level(DEBUG_LED_GPIO, 0);
+            
             esp_zb_scheduler_alarm((esp_zb_callback_t)bdb_start_top_level_commissioning_cb,
                                    ESP_ZB_BDB_MODE_INITIALIZATION, 1000);
         }
@@ -267,18 +268,26 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             ESP_LOGI(TAG, "✅ JOINED NETWORK - PAN: 0x%04hx, Channel: %d, Addr: 0x%04hx",
                      esp_zb_get_pan_id(), esp_zb_get_current_channel(), esp_zb_get_short_address());
             
-            // One long blink = successfully joined network
-            led_blink(1, 1000, 0);  // 1 second blink
+            // Three quick blinks to indicate successful join
+            for (size_t i = 0; i < 3; i++)
+            {
+                gpio_set_level(DEBUG_LED_GPIO, 1);
+                for (volatile int j = 0; j < 4000000; j++); // ~500ms on
+                gpio_set_level(DEBUG_LED_GPIO, 0);
+                for (volatile int j = 0; j < 4000000; j++); // ~500ms off
+            }
             
             ESP_LOGI(TAG, "Starting temperature sensor task (new join)");
             deferred_driver_init();
             
         } else {
-            static int retry_count = 0;
-            if (++retry_count % 10 == 0) {
-                ESP_LOGW(TAG, "🔄 Still searching for network (attempt %d)", retry_count);
-                led_blink_quick(1);  // Single quick blink every 10 retries
-            }
+            ESP_LOGW(TAG, "🔄 Still searching for network...");
+
+            // Slow blink while searching for network
+            gpio_set_level(DEBUG_LED_GPIO, 1);
+            for (volatile int i = 0; i < 12000000; i++); // ~1 second
+            gpio_set_level(DEBUG_LED_GPIO, 0);
+            
             esp_zb_scheduler_alarm((esp_zb_callback_t)bdb_start_top_level_commissioning_cb, 
                                    ESP_ZB_BDB_MODE_NETWORK_STEERING, 1000);
         }
@@ -380,19 +389,22 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(nvs_flash_init());
     
-    // ========== PHASE 1: Enable automatic light sleep ==========
-    esp_pm_config_t pm_config = {
-        .max_freq_mhz = 80,            // Full speed when active (change to 160MHz if needed)
+    // Initialize LED 
+    debug_led_init();
+    led_blink_quick(1);  // Quick blink to show boot started
+    
+    // Enable automatic light sleep
+        esp_pm_config_t pm_config = {
+        .max_freq_mhz = 80,            // Reduce from 160MHz
         .min_freq_mhz = 40,            // Drop to 40MHz when idle
         .light_sleep_enable = true     // Enable automatic light sleep
     };
     esp_err_t pm_err = esp_pm_configure(&pm_config);
     if (pm_err == ESP_OK) {
-        ESP_LOGI("POWER", "✅ Automatic light sleep enabled (80MHz → 40MHz)");
+        ESP_LOGI("POWER", "✅ Power management enabled: 80MHz max, 40MHz idle, light sleep ON");
     } else {
         ESP_LOGW("POWER", "⚠️  Failed to enable power management: %s", esp_err_to_name(pm_err));
     }
-    // ===========================================================
     
     ESP_ERROR_CHECK(esp_zb_platform_config(&config));
 

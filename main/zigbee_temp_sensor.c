@@ -49,6 +49,16 @@ static void esp_app_temp_sensor_handler(uint8_t sensor_index, float temperature)
     esp_zb_lock_release();
 }
 
+static int compare_rom_addresses(const void *a, const void *b)
+{
+    ds18x20_addr_t addr_a = *(ds18x20_addr_t*)a;
+    ds18x20_addr_t addr_b = *(ds18x20_addr_t*)b;
+    
+    if (addr_a < addr_b) return -1;
+    if (addr_a > addr_b) return 1;
+    return 0;
+}
+
 static esp_err_t ds18b20_init(void)
 {
     ESP_LOGI(TAG, "Initializing DS18B20 on GPIO%d", DS18B20_GPIO);
@@ -62,6 +72,11 @@ static esp_err_t ds18b20_init(void)
     }
     
     ESP_LOGI(TAG, "Found %d DS18B20 sensor(s)", sensor_count);
+
+    // Sort sensors by ROM address for consistent indexing
+    qsort(ds18b20_addrs, sensor_count, sizeof(ds18x20_addr_t), compare_rom_addresses);
+
+    ESP_LOGI(TAG, "Sensors sorted by ROM address:");
     
     // Log each sensor's ROM address - use correct format specifiers
     for (size_t i = 0; i < sensor_count; i++) {

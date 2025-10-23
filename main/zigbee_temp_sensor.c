@@ -18,7 +18,6 @@
 
 static const char *TAG = "ESP_ZB_TEMP_SENSOR";
 
-
 /* Debug LED */
 #define DEBUG_LED_GPIO                 15        /* GPIO15 for status LED */
 
@@ -117,10 +116,10 @@ static void led_blink_quick(int times)
     led_blink(times, 100, 100);  // 100ms on, 100ms off
 }
 
-static void led_blink_normal(int times)
-{
-    led_blink(times, 200, 200);  // 200ms on, 200ms off
-}
+// static void led_blink_normal(int times)
+// {
+//     led_blink(times, 200, 200);  // 200ms on, 200ms off
+// }
 
 static void led_blink_long(int times)
 {
@@ -276,7 +275,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                 gpio_set_level(DEBUG_LED_GPIO, 0);
                 for (volatile int j = 0; j < 4000000; j++); // ~500ms off
             }
-            
+
             ESP_LOGI(TAG, "Starting temperature sensor task (new join)");
             deferred_driver_init();
             
@@ -389,22 +388,11 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(nvs_flash_init());
     
-    // Initialize LED 
+    // Initialize LED early
     debug_led_init();
-    led_blink_quick(1);  // Quick blink to show boot started
+    led_blink_quick(1);
     
-    // Enable automatic light sleep
-        esp_pm_config_t pm_config = {
-        .max_freq_mhz = 80,            // Reduce from 160MHz
-        .min_freq_mhz = 40,            // Drop to 40MHz when idle
-        .light_sleep_enable = true     // Enable automatic light sleep
-    };
-    esp_err_t pm_err = esp_pm_configure(&pm_config);
-    if (pm_err == ESP_OK) {
-        ESP_LOGI("POWER", "✅ Power management enabled: 80MHz max, 40MHz idle, light sleep ON");
-    } else {
-        ESP_LOGW("POWER", "⚠️  Failed to enable power management: %s", esp_err_to_name(pm_err));
-    }
+    ESP_LOGI("POWER", "Running at 80MHz with tickless idle for battery savings");
     
     ESP_ERROR_CHECK(esp_zb_platform_config(&config));
 

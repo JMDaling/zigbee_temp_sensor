@@ -371,8 +371,6 @@ static void esp_zb_task(void *pvParameters)
 
 void app_main(void)
 {
-    // REMOVE the LED test code - not needed anymore
-    
     esp_zb_platform_config_t config = {
         .radio_config = {.radio_mode = ZB_RADIO_MODE_NATIVE},
         .host_config = {.host_connection_mode = ZB_HOST_CONNECTION_MODE_NONE},

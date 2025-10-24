@@ -135,7 +135,6 @@ static void led_blink_long(int times)
     led_blink(times, 800, 400);  // 800ms on, 400ms off
 }
 
-
 static esp_err_t battery_init(void)
 {
     ESP_LOGI(TAG, "Initializing battery monitor on GPIO0 (ADC1_CH0 - internal)");
@@ -219,19 +218,38 @@ static uint8_t battery_voltage_to_percentage(uint32_t voltage_mv)
 
 static void esp_app_battery_handler(uint8_t endpoint, uint8_t battery_pct)
 {
-    // REMOVE this duplicate call - battery_mv is already calculated in temp_sensor_task
-    // uint32_t battery_mv = battery_read_voltage_mv();
-    
-    // Calculate voltage unit from the battery percentage
-    // We need to get the actual voltage, so keep ONE call here
     uint32_t battery_mv = battery_read_voltage_mv();
-    uint8_t battery_voltage_unit = battery_mv / 100;  // Convert mV to units of 100mV
+    uint8_t battery_voltage_unit = MIN(battery_mv / 100, 0xFF);
+
+    esp_zb_zcl_set_attribute_val(endpoint,
+        ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
+        &battery_pct,
+        false);
+
+    esp_zb_zcl_set_attribute_val(endpoint,
+        ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
+        &battery_voltage_unit,
+        false);
+}
+
+/* Force battery report callback, invoked during ZHA discovery */
+static void force_battery_report_cb(uint8_t unused)
+{
+    ESP_LOGI(TAG, "🔋 Forcing initial battery report for ZHA discovery");
     
-    ESP_LOGI(TAG, "📊 Battery update for endpoint %d: %d%% (%lu mV, unit: %d)", 
-             endpoint, battery_pct / 2, (unsigned long)battery_mv, battery_voltage_unit);
+    uint32_t battery_mv = battery_read_voltage_mv();
+    uint8_t battery_pct = battery_voltage_to_percentage(battery_mv);
     
-    // Report battery voltage (0x0020)
-    esp_zb_zcl_status_t state_v = esp_zb_zcl_set_attribute_val(
+    // FIXED: Report ONLY to first endpoint (not all endpoints!)
+    uint8_t endpoint = HA_TEMP_SENSOR_ENDPOINT_BASE;  // Only endpoint 10
+    
+    // Report battery voltage
+    uint8_t battery_voltage_unit = battery_mv / 100;
+    esp_zb_zcl_set_attribute_val(
         endpoint,
         ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
         ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
@@ -240,8 +258,8 @@ static void esp_app_battery_handler(uint8_t endpoint, uint8_t battery_pct)
         false
     );
     
-    // Report battery percentage (0x0021)
-    esp_zb_zcl_status_t state_p = esp_zb_zcl_set_attribute_val(
+    // Report battery percentage
+    esp_zb_zcl_set_attribute_val(
         endpoint,
         ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
         ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
@@ -249,13 +267,9 @@ static void esp_app_battery_handler(uint8_t endpoint, uint8_t battery_pct)
         &battery_pct,
         false
     );
-
-    if (state_v != ESP_ZB_ZCL_STATUS_SUCCESS) {
-        ESP_LOGE(TAG, "Failed to set battery voltage for endpoint %d", endpoint);
-    }
-    if (state_p != ESP_ZB_ZCL_STATUS_SUCCESS) {
-        ESP_LOGE(TAG, "Failed to set battery percentage for endpoint %d", endpoint);
-    }
+    
+    ESP_LOGI(TAG, "   Endpoint %d: %lu mV (%d%%)", endpoint, 
+             (unsigned long)battery_mv, battery_pct / 2);
 }
 
 static void temp_sensor_task(void *pvParameters)
@@ -326,6 +340,7 @@ static void temp_sensor_task(void *pvParameters)
         }
 
         // Read and report battery (every hour or on first reading)
+        // Read and report battery (every hour or on first reading)
         battery_report_counter += TEMP_REPORT_INTERVAL_MS;
         if (battery_report_counter >= BATTERY_REPORT_INTERVAL_MS || last_reported_battery_pct == 255) {
             battery_report_counter = 0;
@@ -333,14 +348,11 @@ static void temp_sensor_task(void *pvParameters)
             uint32_t battery_mv = battery_read_voltage_mv();
             uint8_t battery_pct = battery_voltage_to_percentage(battery_mv);
             
-            // Report battery to all endpoints
-            for (size_t i = 0; i < sensor_count; i++) {
-                esp_app_battery_handler(HA_TEMP_SENSOR_ENDPOINT_BASE + i, battery_pct);
-            }
+            // FIXED: Report battery ONLY to first endpoint (one battery for entire device)
+            esp_app_battery_handler(HA_TEMP_SENSOR_ENDPOINT_BASE, battery_pct);
 
-            // SIMPLIFIED: Just log the final values (remove duplicate ADC debug logs)
-            ESP_LOGI(TAG, "🔋 Battery: %lu mV (%d%%) reported to %d endpoint(s)", 
-                     (unsigned long)battery_mv, battery_pct / 2, sensor_count);
+            ESP_LOGI(TAG, "🔋 Battery: %lu mV (%d%%) reported to endpoint %d", 
+                     (unsigned long)battery_mv, battery_pct / 2, HA_TEMP_SENSOR_ENDPOINT_BASE);
             last_reported_battery_pct = battery_pct;
         }
 
@@ -431,8 +443,10 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             }
 
             ESP_LOGI(TAG, "Starting temperature sensor task (new join)");
+
             deferred_driver_init();
-            
+            esp_zb_scheduler_alarm((esp_zb_callback_t)force_battery_report_cb, 0, 5000);
+
         } else {
             ESP_LOGW(TAG, "🔄 Still searching for network...");
 
@@ -454,43 +468,48 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
     }
 }
 
-static esp_zb_cluster_list_t *custom_temperature_sensor_clusters_create(esp_zb_temperature_sensor_cfg_t *temperature_sensor)
+static esp_zb_cluster_list_t *custom_temperature_sensor_clusters_create(
+        esp_zb_temperature_sensor_cfg_t *cfg, bool include_battery)
 {
-    esp_zb_cluster_list_t *cluster_list = esp_zb_zcl_cluster_list_create();
-    
-    // Basic cluster
-    esp_zb_attribute_list_t *basic_cluster = esp_zb_basic_cluster_create(&(temperature_sensor->basic_cfg));
-    ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, MANUFACTURER_NAME));
-    ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, MODEL_IDENTIFIER));
-    ESP_ERROR_CHECK(esp_zb_cluster_list_add_basic_cluster(cluster_list, basic_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
-    
-    // Identify cluster
-    ESP_ERROR_CHECK(esp_zb_cluster_list_add_identify_cluster(cluster_list, esp_zb_identify_cluster_create(&(temperature_sensor->identify_cfg)), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
-    ESP_ERROR_CHECK(esp_zb_cluster_list_add_identify_cluster(cluster_list, esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_IDENTIFY), ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE));
-    
-    // Temperature measurement cluster
-    ESP_ERROR_CHECK(esp_zb_cluster_list_add_temperature_meas_cluster(cluster_list, esp_zb_temperature_meas_cluster_create(&(temperature_sensor->temp_meas_cfg)), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
-    
-    // Power Configuration cluster (for battery reporting)
-    esp_zb_power_config_cluster_cfg_t power_cfg = {
-        .main_voltage = 0,
-        .main_freq = 0,
-    };
-    esp_zb_attribute_list_t *power_cluster = esp_zb_power_config_cluster_create(&power_cfg);
-    
-    // Add battery voltage attribute (units of 100mV)
-    uint8_t battery_voltage = 42;  // Default: 4.2V = 42
-    ESP_ERROR_CHECK(esp_zb_power_config_cluster_add_attr(power_cluster, 
-        ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID, &battery_voltage));
-    
-    // Add battery percentage attribute (0-200 = 0-100%)
-    uint8_t battery_percentage = 200;  // Default: 100%
-    ESP_ERROR_CHECK(esp_zb_power_config_cluster_add_attr(power_cluster, 
-        ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID, &battery_percentage));
-    
-    ESP_ERROR_CHECK(esp_zb_cluster_list_add_power_config_cluster(cluster_list, power_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
-    
-    return cluster_list;
+    esp_zb_cluster_list_t *list = esp_zb_zcl_cluster_list_create();
+    cfg->basic_cfg.power_source = ESP_ZB_ZCL_BASIC_POWER_SOURCE_BATTERY;
+
+    esp_zb_attribute_list_t *basic = esp_zb_basic_cluster_create(&cfg->basic_cfg);
+    ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic,
+        ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, MANUFACTURER_NAME));
+    ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic,
+        ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, MODEL_IDENTIFIER));
+    ESP_ERROR_CHECK(esp_zb_cluster_list_add_basic_cluster(list, basic,
+        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+
+    ESP_ERROR_CHECK(esp_zb_cluster_list_add_identify_cluster(list,
+        esp_zb_identify_cluster_create(&cfg->identify_cfg),
+        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+    ESP_ERROR_CHECK(esp_zb_cluster_list_add_identify_cluster(list,
+        esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_IDENTIFY),
+        ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE));
+
+    ESP_ERROR_CHECK(esp_zb_cluster_list_add_temperature_meas_cluster(list,
+        esp_zb_temperature_meas_cluster_create(&cfg->temp_meas_cfg),
+        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+
+    if (include_battery) {
+        esp_zb_power_config_cluster_cfg_t power_cfg = { .main_voltage = 0, .main_freq = 0 };
+        esp_zb_attribute_list_t *power = esp_zb_power_config_cluster_create(&power_cfg);
+
+        uint8_t battery_voltage = 42;
+        uint8_t battery_pct = 200;
+
+        ESP_ERROR_CHECK(esp_zb_power_config_cluster_add_attr(power,
+            ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID, &battery_voltage));
+        ESP_ERROR_CHECK(esp_zb_power_config_cluster_add_attr(power,
+            ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID, &battery_pct));
+
+        ESP_ERROR_CHECK(esp_zb_cluster_list_add_power_config_cluster(list, power,
+            ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
+    }
+
+    return list;
 }
 
 static void esp_zb_task(void *pvParameters)
@@ -516,20 +535,20 @@ static void esp_zb_task(void *pvParameters)
         esp_zb_temperature_sensor_cfg_t sensor_cfg = ESP_ZB_DEFAULT_TEMPERATURE_SENSOR_CONFIG();
         sensor_cfg.temp_meas_cfg.min_value = zb_temperature_to_s16(TEMP_SENSOR_MIN_VALUE);
         sensor_cfg.temp_meas_cfg.max_value = zb_temperature_to_s16(TEMP_SENSOR_MAX_VALUE);
-        
+
         uint8_t endpoint_id = HA_TEMP_SENSOR_ENDPOINT_BASE + i;
-        
-        // Create clusters and endpoint config
-        esp_zb_cluster_list_t *cluster_list = custom_temperature_sensor_clusters_create(&sensor_cfg);
-        esp_zb_endpoint_config_t endpoint_config = {
+        bool include_battery = (i == 0);
+
+        esp_zb_cluster_list_t *cluster_list =
+            custom_temperature_sensor_clusters_create(&sensor_cfg, include_battery);
+
+        esp_zb_endpoint_config_t ep_cfg = {
             .endpoint = endpoint_id,
             .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
             .app_device_id = ESP_ZB_HA_TEMPERATURE_SENSOR_DEVICE_ID,
-            .app_device_version = 0
+            .app_device_version = 0,
         };
-        
-        // Add endpoint to the list
-        esp_zb_ep_list_add_ep(esp_zb_ep_list, cluster_list, endpoint_config);
+        esp_zb_ep_list_add_ep(esp_zb_ep_list, cluster_list, ep_cfg);
     }
 
     /* Register the device */
@@ -537,9 +556,11 @@ static void esp_zb_task(void *pvParameters)
 
     /* Config the reporting info for all endpoints */
     for (uint8_t i = 0; i < MAX_SENSORS; i++) {
-        esp_zb_zcl_reporting_info_t reporting_info = {
+        uint8_t endpoint = HA_TEMP_SENSOR_ENDPOINT_BASE + i;
+
+        esp_zb_zcl_reporting_info_t temp_reporting = {
             .direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_SRV,
-            .ep = HA_TEMP_SENSOR_ENDPOINT_BASE + i,
+            .ep = endpoint,
             .cluster_id = ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
             .cluster_role = ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
             .dst.profile_id = ESP_ZB_AF_HA_PROFILE_ID,
@@ -551,7 +572,41 @@ static void esp_zb_task(void *pvParameters)
             .attr_id = ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
             .manuf_code = ESP_ZB_ZCL_ATTR_NON_MANUFACTURER_SPECIFIC,
         };
-        esp_zb_zcl_update_reporting_info(&reporting_info);
+        esp_zb_zcl_update_reporting_info(&temp_reporting);
+
+        if (i == 0) {
+            esp_zb_zcl_reporting_info_t battery_pct_reporting = {
+                .direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_SRV,
+                .ep = endpoint,
+                .cluster_id = ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+                .cluster_role = ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                .dst.profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+                .u.send_info.min_interval = 60,
+                .u.send_info.max_interval = 3600,
+                .u.send_info.def_min_interval = 60,
+                .u.send_info.def_max_interval = 3600,
+                .u.send_info.delta.u8 = 2,
+                .attr_id = ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
+                .manuf_code = ESP_ZB_ZCL_ATTR_NON_MANUFACTURER_SPECIFIC,
+            };
+            esp_zb_zcl_update_reporting_info(&battery_pct_reporting);
+
+            esp_zb_zcl_reporting_info_t battery_voltage_reporting = {
+                .direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_SRV,
+                .ep = endpoint,
+                .cluster_id = ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+                .cluster_role = ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                .dst.profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+                .u.send_info.min_interval = 300,
+                .u.send_info.max_interval = 3600,
+                .u.send_info.def_min_interval = 300,
+                .u.send_info.def_max_interval = 3600,
+                .u.send_info.delta.u8 = 1,
+                .attr_id = ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_VOLTAGE_ID,
+                .manuf_code = ESP_ZB_ZCL_ATTR_NON_MANUFACTURER_SPECIFIC,
+            };
+            esp_zb_zcl_update_reporting_info(&battery_voltage_reporting);
+        }
     }
     
     esp_zb_set_primary_network_channel_set(ESP_ZB_PRIMARY_CHANNEL_MASK);
@@ -562,6 +617,9 @@ static void esp_zb_task(void *pvParameters)
 
 void app_main(void)
 {
+    // Log app start
+    ESP_LOGI(TAG, "=== Zigbee Temperature Sensor Application Starting ===");
+
     esp_zb_platform_config_t config = {
         .radio_config = {.radio_mode = ZB_RADIO_MODE_NATIVE},
         .host_config = {.host_connection_mode = ZB_HOST_CONNECTION_MODE_NONE},
@@ -572,6 +630,10 @@ void app_main(void)
     debug_led_init();
     led_blink_quick(1);
     
+    // Log Manufacturer and Model
+    ESP_LOGI(TAG, "Manufacturer: %s", MANUFACTURER_NAME);
+    ESP_LOGI(TAG, "Model: %s", MODEL_IDENTIFIER);
+
     ESP_LOGI("POWER", "Running at 80MHz with tickless idle for battery savings");
     
     ESP_ERROR_CHECK(esp_zb_platform_config(&config));

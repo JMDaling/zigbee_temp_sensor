@@ -7,7 +7,7 @@
 #define INSTALLCODE_POLICY_ENABLE       false    /* Disable install code for easier pairing */
 #define ED_AGING_TIMEOUT                ESP_ZB_ED_AGING_TIMEOUT_64MIN
 #define ED_KEEP_ALIVE                   10000    /* Wake up every 10 seconds */
-#define HA_TEMP_SENSOR_ENDPOINT_BASE    10       /* Base endpoint (10, 11, 12 for 3 sensors) */
+#define HA_TEMP_SENSOR_ENDPOINT_BASE    1        /* Base endpoint (1, 2, 3 for 3 sensors) */
 #define ESP_ZB_PRIMARY_CHANNEL_MASK     (1 << 25) /* Channel 25 */
 
 /* DS18B20 configuration */
@@ -27,7 +27,10 @@
 #define BATTERY_REPORT_INTERVAL_MS      3600000 /* Report battery every 1 hour */
 
 /* Basic cluster attributes */
-#define MANUFACTURER_NAME               "\x09""ESPRESSIF"
-#define MODEL_IDENTIFIER                "\x07"CONFIG_IDF_TARGET
+#define MFG_NAME_STR      "ESPRESSIF"
+#define MODEL_ID_STR      "ESP32C6_ZB_TEMP_JMD"
+
+#define MANUFACTURER_NAME "\x09" MFG_NAME_STR
+#define MODEL_IDENTIFIER  "\x13" MODEL_ID_STR
 
 #endif // ZIGBEE_TEMP_SENSOR_H

@@ -526,6 +526,10 @@ static void esp_zb_task(void *pvParameters)
         },
     };
     esp_zb_init(&zb_nwk_cfg);
+    
+    // Make ED sleepy (no RX while idle)
+    esp_zb_set_rx_on_when_idle(false);          // ensure RxOnWhenIdle = 0 (sleepy)
+    esp_zb_sleep_set_threshold(50);             // optional: enter sleep if idle > 50ms
 
     /* Create endpoint list with multiple temperature sensors */
     esp_zb_ep_list_t *esp_zb_ep_list = esp_zb_ep_list_create();

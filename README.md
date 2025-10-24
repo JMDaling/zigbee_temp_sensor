@@ -36,5 +36,6 @@ idf.py -p /dev/ttyACM0 monitor
 ```
 
 ## Notes
-- Sometimes had issues running monitor right after build/flash in one line, run separetly.
-- 
+- Use script to erase, build, flash & monitor: Sometimes had issues running monitor right after build/flash in one line, run separetly.
+- If battery monitoring does not get identified, try removing the USB before it pairs/connects, then running it off the battery for pairing, helps with identifying the power source = battery != mains
+

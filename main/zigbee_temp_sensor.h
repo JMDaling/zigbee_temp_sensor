@@ -24,7 +24,7 @@
 #define BATTERY_ADC_ATTEN               ADC_ATTEN_DB_12 /* 0-3.3V range */
 #define BATTERY_MIN_VOLTAGE             3000    /* 3.0V = 0% (mV) */
 #define BATTERY_MAX_VOLTAGE             4200    /* 4.2V = 100% (mV) */
-#define BATTERY_REPORT_INTERVAL_MS      3600000 /* Report battery every 1 hour */
+#define BATTERY_REPORT_INTERVAL_MS      1800000 /* Report battery every 30min */
 
 /* Basic cluster attributes */
 #define MFG_NAME_STR      "ESPRESSIF"

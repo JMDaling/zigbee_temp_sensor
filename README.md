@@ -1,4 +1,25 @@
 
+# Zigbee Temperature Sensor - ESP32-C6
+
+Battery-powered Zigbee End Device that reads up to 3 DS18B20 temperature sensors and reports battery voltage.
+
+## Setup ESP-IDF Environment
+
+Before building, you need to set up the ESP-IDF environment in each terminal session:
+
+```bash
+# Source ESP-IDF tools (adds idf.py to PATH and sets environment variables)
+. ~/prototypes/tools/esp-idf/export.sh
+```
+
+**What export.sh does:** Sets up the ESP-IDF toolchain by adding build tools (idf.py, xtensa-gcc, etc.) to your PATH and configuring environment variables needed for ESP32 development.
+
+**Optional:** Add to ~/.zshrc to make it automatic:
+```bash
+echo ". ~/prototypes/tools/esp-idf/export.sh" >> ~/.zshrc
+```
+
+## Build & Flash
 
 To see active devices on ports and which to use: 
 ```bash
@@ -28,8 +49,13 @@ Montitor (aka run)
 idf.py -p /dev/ttyACM0 monitor
 ```
 
-All in one full erase and reflash
+**Recommended:** All in one full erase and reflash
+```bash
+./erase_build_flash_monitor.sh
 ```
+
+Or manually:
+```bash
 idf.py -p /dev/ttyACM0 erase-flash
 idf.py -p /dev/ttyACM0 build flash
 idf.py -p /dev/ttyACM0 monitor
